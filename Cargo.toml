@@ -1,0 +1,22 @@
+[workspace]
+members = [".", "macros"]
+
+[package]
+name = "aeiou"
+version = "0.1.0"
+edition = "2018"
+authors = ["Vladislav Melnik <vladislav.melnik@protonmail.com>"]
+license = "MIT"
+description = "Algebraic effects"
+repository = "https://github.com/vlad9486/aeiou.git"
+
+[[example]]
+required-features = ["derive"]
+name = "hello-world"
+path = "examples/hello_world.rs"
+
+[dependencies]
+aeiou-macros = { version = "0.1.0", path = "macros", optional = true }
+
+[features]
+derive = ["aeiou-macros"]

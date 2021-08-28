@@ -1,0 +1,16 @@
+[package]
+name = "aeiou-macros"
+version = "0.1.0"
+edition = "2018"
+authors = ["Vladislav Melnik <vladislav.melnik@protonmail.com>"]
+license = "MIT"
+description = "Algebraic effects derive macro"
+repository = "https://github.com/vlad9486/aeiou.git"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { version = "1.0" }
+syn = { version = "1.0", features = ["derive", "parsing"] }
+quote = { version = "1.0" }
