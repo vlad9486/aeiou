@@ -17,6 +17,7 @@ path = "examples/hello_world.rs"
 
 [dependencies]
 aeiou-macros = { version = "0.1.0", path = "macros", optional = true }
+either = { version = "1.6" }
 
 [features]
 derive = ["aeiou-macros"]

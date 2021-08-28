@@ -4,7 +4,7 @@
 // TODO: lazy handlers
 
 #![forbid(unsafe_code)]
-#![feature(generators, generator_trait)]
+#![feature(generators, generator_trait, never_type)]
 
 #[cfg(feature = "aeiou-macros")]
 pub use aeiou_macros::*;
@@ -14,6 +14,8 @@ pub use self::algebra::{Effect, Composable, Context};
 
 mod computation;
 pub use self::computation::{Computation, IntoComputation, Handler};
+
+pub mod new;
 
 #[macro_export]
 macro_rules! perform {
