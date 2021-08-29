@@ -1,8 +1,6 @@
 // Copyright 2021 Vladislav Melnik
 // SPDX-License-Identifier: MIT
 
-// TODO: lazy handlers
-
 #![forbid(unsafe_code)]
 #![feature(generators, generator_trait, never_type)]
 

@@ -6,162 +6,70 @@ use std::{
     cell::RefCell,
     pin::Pin,
     ops::{Generator, GeneratorState},
+    collections::BTreeMap,
 };
-
 use either::Either;
 
-pub trait EffectOutput {
-    type Input: EffectInput<Output = Self>;
-}
+pub struct Context<Output>(Rc<RefCell<Option<Output>>>);
 
-pub trait EffectInput {
-    type Output: EffectOutput<Input = Self>;
-}
-
-impl EffectOutput for ! {
-    type Input = !;
-}
-
-impl EffectInput for ! {
-    type Output = !;
-}
-
-impl<L, R> EffectOutput for Either<L, R>
-where
-    L: EffectOutput,
-    R: EffectOutput,
-{
-    type Input = Either<L::Input, R::Input>;
-}
-
-impl<L, R> EffectInput for Either<L, R>
-where
-    L: EffectInput,
-    R: EffectInput,
-{
-    type Output = Either<L::Output, R::Output>;
-}
-
-pub struct Context<Output>(Rc<RefCell<Option<Output>>>)
-where
-    Output: EffectOutput;
-
-impl<Output> Context<Output>
-where
-    Output: EffectOutput,
-{
+impl<Output> Context<Output> {
     pub fn empty() -> Self {
         Context(Rc::new(RefCell::new(None)))
     }
+
+    pub fn take(&self) -> Option<Output> {
+        self.0.borrow_mut().take()
+    }
 }
 
-impl<Output> Clone for Context<Output>
-where
-    Output: EffectOutput,
-{
+impl<Output> Clone for Context<Output> {
     fn clone(&self) -> Self {
         Context(self.0.clone())
     }
 }
 
-pub trait EffectHandler {
-    type Input: EffectInput;
+pub trait TaskId {
+    type Id: Eq + Ord;
 
-    fn handle(&mut self, input: Self::Input) -> <Self::Input as EffectInput>::Output;
+    fn task_id(&self) -> Self::Id;
 }
 
-pub type Unhandled<Handler, Input> = <Input as Select<<Handler as EffectHandler>::Input>>::Rest;
-
-pub trait Select<Part>
+pub trait Request
 where
-    Self: EffectInput,
-    Part: EffectInput,
+    Self: Sized,
 {
-    type Rest: EffectInput;
+    type Task: TaskId;
+    type Effect;
 
-    fn take_input(self) -> Either<Part, Self::Rest>;
-    fn take_output(v: Self::Output) -> Either<Part::Output, <Self::Rest as EffectInput>::Output>;
-
-    fn wrap_output(v: Part::Output) -> Self::Output;
+    fn is_task(self) -> Result<Self::Task, Self>;
+    fn is_effect(self) -> Result<Self::Effect, Self>;
 }
 
-pub trait Selected<Total>
-where
-    Self: EffectInput,
-    Total: EffectInput,
-{
-    type Rest: EffectInput;
+impl TaskId for ! {
+    type Id = !;
 
-    fn wrap_output(v: Self::Output) -> Total::Output;
-}
-
-impl<L, R> Select<L> for Either<L, R>
-where
-    L: EffectInput,
-    R: EffectInput,
-{
-    type Rest = R;
-
-    fn take_input(self) -> Either<L, Self::Rest> {
-        self
-    }
-
-    fn take_output(v: Self::Output) -> Either<L::Output, R::Output> {
-        v
-    }
-
-    fn wrap_output(v: L::Output) -> Self::Output {
-        Either::Left(v)
+    fn task_id(&self) -> Self::Id {
+        loop {}
     }
 }
 
-impl<Input> Select<Input> for Input
-where
-    Input: EffectInput,
-{
-    type Rest = !;
+impl Request for ! {
+    type Task = !;
+    type Effect = !;
 
-    fn take_input(self) -> Either<Input, Self::Rest> {
-        Either::Left(self)
+    fn is_task(self) -> Result<Self::Task, Self> {
+        loop {}
     }
 
-    fn take_output(v: Self::Output) -> Either<Input::Output, <Self::Rest as EffectInput>::Output> {
-        Either::Left(v)
-    }
-
-    fn wrap_output(v: Input::Output) -> Self::Output {
-        v
-    }
-}
-
-impl<L, R> Selected<Either<L, R>> for R
-where
-    L: EffectInput,
-    R: EffectInput,
-{
-    type Rest = L;
-
-    fn wrap_output(v: Self::Output) -> <Either<L, R> as EffectInput>::Output {
-        Either::Right(v)
-    }
-}
-
-impl<Input> Selected<Input> for Input
-where
-    Input: EffectInput,
-{
-    type Rest = !;
-
-    fn wrap_output(v: Self::Output) -> Input::Output {
-        v
+    fn is_effect(self) -> Result<Self::Effect, Self> {
+        loop {}
     }
 }
 
 pub struct Block<Output, G>
 where
-    Output: EffectOutput,
     G: Unpin + Generator<(), Return = ()>,
-    G::Yield: EffectInput,  //Selected<Output::Input>
+    G::Yield: Request,
 {
     context: Context<Output>,
     generator: G,
@@ -169,9 +77,8 @@ where
 
 pub trait IntoBlock<Output, G>
 where
-    Output: EffectOutput,
     G: Unpin + Generator<(), Return = ()>,
-    G::Yield: EffectInput + Selected<Output::Input>,
+    G::Yield: Request,
 {
     fn into_block(self) -> Block<Output, G>;
 }
@@ -179,9 +86,8 @@ where
 impl<F, Output, G> IntoBlock<Output, G> for F
 where
     F: FnOnce(Context<Output>) -> G,
-    Output: EffectOutput,
     G: Unpin + Generator<(), Return = ()>,
-    G::Yield: EffectInput + Selected<Output::Input>,
+    G::Yield: Request,
 {
     fn into_block(self) -> Block<Output, G> {
         let context = Context::empty();
@@ -194,8 +100,8 @@ where
 
 impl<Output, G> Block<Output, G>
 where
-    Output: EffectOutput,
     G: Unpin + Generator<(), Return = (), Yield = !>,
+    G::Yield: Request,
 {
     pub fn run(self) {
         let Block { mut generator, .. } = self;
@@ -208,33 +114,91 @@ where
 
 impl<Output, G> Block<Output, G>
 where
-    Output: EffectOutput,
     G: Unpin + Generator<(), Return = ()>,
-    G::Yield: EffectInput + Selected<Output::Input>,
+    G::Yield: Request,
 {
-    pub fn add_handler<Handler>(
+    pub fn spawn<F, T>(
+        self,
+        task_gen: F,
+    ) -> Block<Output, impl Generator<(), Return = (), Yield = G::Yield>>
+    where
+        F: Fn(<G::Yield as Request>::Task) -> T,
+        T: Unpin + Generator<(), Return = (), Yield = Either<G::Yield, Output>>,
+    {
+        let Block { context, generator } = self;
+        Block {
+            context: context.clone(),
+            generator: move || {
+                let mut generator = Some(generator);
+                let mut tasks = BTreeMap::new();
+                loop {
+                    if let Some(g) = generator.as_mut() {
+                        match Pin::new(g).resume(()) {
+                            GeneratorState::Complete(()) => {
+                                let _ = generator.take();
+                            },
+                            GeneratorState::Yielded(y) => match y.is_task() {
+                                Ok(task) => {
+                                    tasks.insert(task.task_id(), task_gen(task));
+                                },
+                                Err(y) => yield y,
+                            },
+                        }
+                    }
+                    let mut new_tasks = BTreeMap::new();
+                    for (id, mut task) in tasks {
+                        match Pin::new(&mut task).resume(()) {
+                            GeneratorState::Complete(()) => (),
+                            GeneratorState::Yielded(y) => {
+                                new_tasks.insert(id, task);
+                                match y {
+                                    Either::Left(further) => yield further,
+                                    Either::Right(output) => *context.0.borrow_mut() = Some(output),
+                                }
+                            },
+                        }
+                    }
+                    tasks = new_tasks;
+
+                    if generator.is_none() && tasks.is_empty() {
+                        break;
+                    }
+                }
+            },
+        }
+    }
+
+    pub fn add_handler<Handler, NewYield>(
         self,
         handler: Handler,
-    ) -> Block<Output, impl Generator<(), Return = (), Yield = Unhandled<Handler, G::Yield>>>
+    ) -> Block<Output, impl Generator<(), Return = (), Yield = NewYield>>
     where
-        Handler: EffectHandler,
-        G::Yield: Select<Handler::Input>,
+        Handler: FnMut(<G::Yield as Request>::Effect) -> Result<Output, NewYield>,
+        NewYield: Request,
     {
-        let Block { context, mut generator } = self;
+        let Block {
+            context,
+            mut generator,
+        } = self;
         let handler = RefCell::new(handler);
         Block {
             context: context.clone(),
             generator: move || loop {
                 match Pin::new(&mut generator).resume(()) {
-                    GeneratorState::Complete(()) => return,
-                    GeneratorState::Yielded(p) => match p.take_input() {
-                        Either::Left(input) => {
-                            let handled = handler.borrow_mut().handle(input);
-                            let wrapped = <G::Yield as Select<Handler::Input>>::wrap_output(handled);
-                            let wrapped = <G::Yield as Selected<Output::Input>>::wrap_output(wrapped);
-                            *context.0.borrow_mut() = Some(wrapped);
-                        },
-                        Either::Right(rest) => yield rest,
+                    GeneratorState::Complete(()) => break,
+                    GeneratorState::Yielded(y) => {
+                        if let Ok(effect) = y.is_effect() {
+                            let mut h = handler.borrow_mut();
+                            match h(effect) {
+                                Ok(output) => {
+                                    *context.0.borrow_mut() = Some(output);
+                                },
+                                Err(y) => {
+                                    drop(h);
+                                    yield y;
+                                },
+                            }
+                        }
                     },
                 }
             },
@@ -244,62 +208,143 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{
+        net::{SocketAddr, TcpListener, TcpStream},
+        collections::BTreeMap,
+        io::{Read, Write},
+    };
+
+    use either::Either;
+
+    use super::{IntoBlock, Context, TaskId, Request};
 
     #[test]
-    fn simple() {
-        pub struct A(u16);
-
-        pub struct AOut(u8);
-
-        pub struct AHandler;
-
-        impl EffectOutput for AOut {
-            type Input = A;
+    fn simple_tcp() {
+        #[derive(Debug)]
+        enum Req {
+            ThrowEffect(Effect),
+            Spawn(Task),
         }
 
-        impl EffectInput for A {
-            type Output = AOut;
+        #[derive(Debug)]
+        enum Effect {
+            Listen(u16),
+            Accept,
+            Connect(SocketAddr),
+            Read(SocketAddr, Vec<u8>, usize),
+            Write(SocketAddr, Vec<u8>, usize),
         }
 
-        impl EffectHandler for AHandler {
-            type Input = A;
+        enum Response {
+            Listening,
+            Accepted(SocketAddr),
+            Connected(SocketAddr),
+            DidRead(SocketAddr, Vec<u8>, usize),
+            DidWrite(SocketAddr, Vec<u8>, usize),
+        }
 
-            fn handle(&mut self, input: Self::Input) -> <Self::Input as EffectInput>::Output {
-                AOut((input.0 >> 8) as u8)
+        #[derive(Debug)]
+        pub struct Task(SocketAddr, bool);
+
+        impl TaskId for Task {
+            type Id = SocketAddr;
+
+            fn task_id(&self) -> Self::Id {
+                self.0.clone()
             }
         }
 
-        pub struct B(u64);
+        impl Request for Req {
+            type Task = Task;
+            type Effect = Effect;
 
-        pub struct BOut(u32);
+            fn is_task(self) -> Result<Self::Task, Self> {
+                match self {
+                    Req::Spawn(task) => Ok(task),
+                    s => Err(s),
+                }
+            }
 
-        pub struct BHandler;
-
-        impl EffectOutput for BOut {
-            type Input = B;
-        }
-
-        impl EffectInput for B {
-            type Output = BOut;
-        }
-
-        impl EffectHandler for BHandler {
-            type Input = B;
-
-            fn handle(&mut self, input: Self::Input) -> <Self::Input as EffectInput>::Output {
-                BOut((input.0 >> 32) as u32)
+            fn is_effect(self) -> Result<Self::Effect, Self> {
+                match self {
+                    Req::ThrowEffect(effect) => Ok(effect),
+                    s => Err(s),
+                }
             }
         }
 
-        let g = move |_context: Context<Either<AOut, BOut>>| move || {
-            yield Either::Left(A(42));
-            yield Either::Right(B(43));
+        let g = move |context: Context<Response>| {
+            move || {
+                yield Req::ThrowEffect(Effect::Listen(8224));
+                yield Req::ThrowEffect(Effect::Connect(([127, 0, 0, 1], 8224).into()));
+                loop {
+                    match context.take() {
+                        Some(Response::Accepted(addr)) => yield Req::Spawn(Task(addr, true)),
+                        Some(Response::Connected(addr)) => {
+                            yield Req::ThrowEffect(Effect::Accept);
+                            yield Req::Spawn(Task(addr, false));
+                        },
+                        Some(Response::DidRead(addr, data, offset)) => {
+                            println!(
+                                "{} -> {:?}",
+                                addr,
+                                std::str::from_utf8(&data[..offset]).unwrap()
+                            );
+                        },
+                        _ => (),
+                    }
+                }
+            }
         };
-        g
-            .into_block()
-            .add_handler(AHandler)
-            .add_handler(BHandler)
+
+        g.into_block()
+            .spawn(move |Task(addr, incoming)| {
+                move || {
+                    println!("new: {}, incoming: {}", addr, incoming);
+                    if incoming {
+                        yield Either::Left(Req::ThrowEffect(Effect::Read(addr, vec![0; 0x10], 0)));
+                    } else {
+                        yield Either::Left(Req::ThrowEffect(Effect::Write(
+                            addr,
+                            b"hello, world\n".to_vec(),
+                            0,
+                        )));
+                    }
+                }
+            })
+            .add_handler({
+                let mut listener = None::<TcpListener>;
+                let mut streams = BTreeMap::new();
+                move |effect: Effect| match effect {
+                    Effect::Listen(port) => {
+                        listener = Some(
+                            TcpListener::bind::<SocketAddr>(([0, 0, 0, 0], port).into()).unwrap(),
+                        );
+                        Ok(Response::Listening)
+                    },
+                    Effect::Accept => {
+                        let (s, addr) = listener.as_ref().unwrap().accept().unwrap();
+                        streams.insert(addr, s);
+                        Ok(Response::Accepted(addr))
+                    },
+                    Effect::Connect(addr) => {
+                        streams.insert(addr, TcpStream::connect(addr).unwrap());
+                        Ok(Response::Connected(addr))
+                    },
+                    Effect::Read(addr, mut buffer, mut offset) => {
+                        if let Some(stream) = streams.get_mut(&addr) {
+                            offset += stream.read(&mut buffer[offset..]).unwrap();
+                        }
+                        Ok(Response::DidRead(addr, buffer, offset))
+                    },
+                    Effect::Write(addr, buffer, mut offset) => {
+                        if let Some(stream) = streams.get_mut(&addr) {
+                            offset += stream.write(&buffer[offset..]).unwrap();
+                        }
+                        Ok(Response::DidWrite(addr, buffer, offset))
+                    },
+                }
+            })
             .run();
     }
 }
