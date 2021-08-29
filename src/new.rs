@@ -1,7 +1,12 @@
 // Copyright 2021 Vladislav Melnik
 // SPDX-License-Identifier: MIT
 
-use std::{rc::Rc, cell::RefCell, pin::Pin, ops::{Generator, GeneratorState}};
+use std::{
+    rc::Rc,
+    cell::RefCell,
+    pin::Pin,
+    ops::{Generator, GeneratorState},
+};
 
 use either::Either;
 
@@ -11,6 +16,30 @@ pub trait EffectOutput {
 
 pub trait EffectInput {
     type Output: EffectOutput<Input = Self>;
+}
+
+impl EffectOutput for ! {
+    type Input = !;
+}
+
+impl EffectInput for ! {
+    type Output = !;
+}
+
+impl<L, R> EffectOutput for Either<L, R>
+where
+    L: EffectOutput,
+    R: EffectOutput,
+{
+    type Input = Either<L::Input, R::Input>;
+}
+
+impl<L, R> EffectInput for Either<L, R>
+where
+    L: EffectInput,
+    R: EffectInput,
+{
+    type Output = Either<L::Output, R::Output>;
 }
 
 pub struct Context<Output>(Rc<RefCell<Option<Output>>>)
@@ -35,16 +64,17 @@ where
     }
 }
 
-pub trait EffectHandler<Input>
-where
-    Input: EffectInput,
-{
-    fn handle(&mut self, input: Input) -> Input::Output;
+pub trait EffectHandler {
+    type Input: EffectInput;
+
+    fn handle(&mut self, input: Self::Input) -> <Self::Input as EffectInput>::Output;
 }
+
+pub type Unhandled<Handler, Input> = <Input as Select<<Handler as EffectHandler>::Input>>::Rest;
 
 pub trait Select<Part>
 where
-    Self: Sized + EffectInput,
+    Self: EffectInput,
     Part: EffectInput,
 {
     type Rest: EffectInput;
@@ -55,38 +85,14 @@ where
     fn wrap_output(v: Part::Output) -> Self::Output;
 }
 
-pub trait CoSelect<Total>
+pub trait Selected<Total>
 where
-    Self: Sized + EffectInput,
+    Self: EffectInput,
     Total: EffectInput,
 {
-    type Part: EffectInput;
+    type Rest: EffectInput;
 
     fn wrap_output(v: Self::Output) -> Total::Output;
-}
-
-impl<L, R> EffectOutput for Either<L, R>
-where
-    L: EffectOutput,
-    R: EffectOutput,
-{
-    type Input = Either<L::Input, R::Input>;
-}
-
-impl<L, R> EffectInput for Either<L, R>
-where
-    L: EffectInput,
-    R: EffectInput,
-{
-    type Output = Either<L::Output, R::Output>;
-}
-
-impl EffectOutput for ! {
-    type Input = !;
-}
-
-impl EffectInput for ! {
-    type Output = !;
 }
 
 impl<L, R> Select<L> for Either<L, R>
@@ -109,18 +115,6 @@ where
     }
 }
 
-impl<L, R> CoSelect<Either<L, R>> for R
-where
-    L: EffectInput,
-    R: EffectInput,
-{
-    type Part = L;
-
-    fn wrap_output(v: Self::Output) -> <Either<L, R> as EffectInput>::Output {
-        Either::Right(v)
-    }
-}
-
 impl<Input> Select<Input> for Input
 where
     Input: EffectInput,
@@ -140,59 +134,111 @@ where
     }
 }
 
-impl<Input> CoSelect<Input> for Input
+impl<L, R> Selected<Either<L, R>> for R
+where
+    L: EffectInput,
+    R: EffectInput,
+{
+    type Rest = L;
+
+    fn wrap_output(v: Self::Output) -> <Either<L, R> as EffectInput>::Output {
+        Either::Right(v)
+    }
+}
+
+impl<Input> Selected<Input> for Input
 where
     Input: EffectInput,
 {
-    type Part = !;
+    type Rest = !;
 
     fn wrap_output(v: Self::Output) -> Input::Output {
         v
     }
 }
 
-pub fn handled<BaseOutput, G, PartInput, Handler>(
-    handler: Handler,
-    impure: G,
-    context: Context<BaseOutput>,
-) -> impl Generator<(), Return = (), Yield = <G::Yield as Select<PartInput>>::Rest>
+pub struct Block<Output, G>
 where
-    BaseOutput: EffectOutput,
+    Output: EffectOutput,
     G: Unpin + Generator<(), Return = ()>,
-    G::Yield: EffectInput + Select<PartInput> + CoSelect<BaseOutput::Input>,
-    PartInput: EffectInput,
-    Handler: EffectHandler<PartInput>,
+    G::Yield: EffectInput,  //Selected<Output::Input>
 {
-    let mut impure = impure;
-    let handler = RefCell::new(handler);
-    move || {
-        loop {
-            match Pin::new(&mut impure).resume(()) {
-                GeneratorState::Complete(()) => return,
-                GeneratorState::Yielded(p) => {
-                    match p.take_input() {
-                        Either::Left(input) => {
-                            let handled = handler.borrow_mut().handle(input);
-                            let wrapped = <G::Yield as Select<PartInput>>::wrap_output(handled);
-                            let wrapped = <G::Yield as CoSelect<BaseOutput::Input>>::wrap_output(wrapped);
-                            *context.0.borrow_mut() = Some(wrapped);
-                        },
-                        Either::Right(rest) => yield rest,
-                    }
-                }
-            }
+    context: Context<Output>,
+    generator: G,
+}
+
+pub trait IntoBlock<Output, G>
+where
+    Output: EffectOutput,
+    G: Unpin + Generator<(), Return = ()>,
+    G::Yield: EffectInput + Selected<Output::Input>,
+{
+    fn into_block(self) -> Block<Output, G>;
+}
+
+impl<F, Output, G> IntoBlock<Output, G> for F
+where
+    F: FnOnce(Context<Output>) -> G,
+    Output: EffectOutput,
+    G: Unpin + Generator<(), Return = ()>,
+    G::Yield: EffectInput + Selected<Output::Input>,
+{
+    fn into_block(self) -> Block<Output, G> {
+        let context = Context::empty();
+        Block {
+            context: context.clone(),
+            generator: self(context),
         }
     }
 }
 
-pub fn run<BaseOutput, G>(pure: G)
+impl<Output, G> Block<Output, G>
 where
+    Output: EffectOutput,
     G: Unpin + Generator<(), Return = (), Yield = !>,
 {
-    let mut pure = pure;
-    match Pin::new(&mut pure).resume(()) {
-        GeneratorState::Complete(()) => (),
-        GeneratorState::Yielded(_) => unreachable!(),
+    pub fn run(self) {
+        let Block { mut generator, .. } = self;
+        match Pin::new(&mut generator).resume(()) {
+            GeneratorState::Complete(()) => (),
+            GeneratorState::Yielded(_) => unreachable!(),
+        }
+    }
+}
+
+impl<Output, G> Block<Output, G>
+where
+    Output: EffectOutput,
+    G: Unpin + Generator<(), Return = ()>,
+    G::Yield: EffectInput + Selected<Output::Input>,
+{
+    pub fn add_handler<Handler>(
+        self,
+        handler: Handler,
+    ) -> Block<Output, impl Generator<(), Return = (), Yield = Unhandled<Handler, G::Yield>>>
+    where
+        Handler: EffectHandler,
+        G::Yield: Select<Handler::Input>,
+    {
+        let Block { context, mut generator } = self;
+        let handler = RefCell::new(handler);
+        Block {
+            context: context.clone(),
+            generator: move || loop {
+                match Pin::new(&mut generator).resume(()) {
+                    GeneratorState::Complete(()) => return,
+                    GeneratorState::Yielded(p) => match p.take_input() {
+                        Either::Left(input) => {
+                            let handled = handler.borrow_mut().handle(input);
+                            let wrapped = <G::Yield as Select<Handler::Input>>::wrap_output(handled);
+                            let wrapped = <G::Yield as Selected<Output::Input>>::wrap_output(wrapped);
+                            *context.0.borrow_mut() = Some(wrapped);
+                        },
+                        Either::Right(rest) => yield rest,
+                    },
+                }
+            },
+        }
     }
 }
 
@@ -208,8 +254,6 @@ mod tests {
 
         pub struct AHandler;
 
-        pub struct AorBHandler;
-
         impl EffectOutput for AOut {
             type Input = A;
         }
@@ -218,18 +262,11 @@ mod tests {
             type Output = AOut;
         }
 
-        impl EffectHandler<A> for AHandler {
-            fn handle(&mut self, input: A) -> <A as EffectInput>::Output {
-                AOut((input.0 >> 8) as u8)
-            }
-        }
+        impl EffectHandler for AHandler {
+            type Input = A;
 
-        impl EffectHandler<Either<A, B>> for AorBHandler {
-            fn handle(&mut self, input: Either<A, B>) -> <Either<A, B> as EffectInput>::Output {
-                match input {
-                    Either::Left(a) => Either::Left(AOut((a.0 >> 8) as u8)),
-                    Either::Right(b) => Either::Right(BHandler.handle(b)),
-                }
+            fn handle(&mut self, input: Self::Input) -> <Self::Input as EffectInput>::Output {
+                AOut((input.0 >> 8) as u8)
             }
         }
 
@@ -247,19 +284,22 @@ mod tests {
             type Output = BOut;
         }
 
-        impl EffectHandler<B> for BHandler {
-            fn handle(&mut self, input: B) -> <B as EffectInput>::Output {
+        impl EffectHandler for BHandler {
+            type Input = B;
+
+            fn handle(&mut self, input: Self::Input) -> <Self::Input as EffectInput>::Output {
                 BOut((input.0 >> 32) as u32)
             }
         }
 
-        let context = Context::<Either<AOut, BOut>>::empty();
-        let g = move || {
+        let g = move |_context: Context<Either<AOut, BOut>>| move || {
             yield Either::Left(A(42));
+            yield Either::Right(B(43));
         };
-
-        let a_handled = handled(AHandler, g, context.clone());
-        let b_handled = handled(BHandler, a_handled, context.clone());
-        run::<Either<AOut, BOut>, _>(b_handled)
+        g
+            .into_block()
+            .add_handler(AHandler)
+            .add_handler(BHandler)
+            .run();
     }
 }
