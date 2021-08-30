@@ -8,18 +8,21 @@
 pub use aeiou_macros::*;
 
 mod algebra;
-pub use self::algebra::{Effect, Composable, Context};
+pub use self::algebra::{Effect, Select};
 
 mod computation;
 pub use self::computation::{Computation, IntoComputation, Handler};
 
 pub mod new;
 
+mod context;
+pub use self::context::Context;
+
 #[macro_export]
 macro_rules! perform {
     ($e:expr, $ctx:expr) => {{
         yield $e;
-        $ctx.take().unwrap()
+        aeiou::Select::take($ctx).unwrap()
     }};
     ($e:expr) => {{
         yield $e;

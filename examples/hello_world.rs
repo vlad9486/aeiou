@@ -10,7 +10,7 @@ use std::{
     thread,
     time::Duration,
 };
-use aeiou::{Composable, Context, Effect, Handler, IntoComputation, perform};
+use aeiou::{Select, Context, Effect, Handler, IntoComputation, perform};
 
 #[derive(Debug)]
 pub enum Effects {
@@ -21,7 +21,7 @@ pub enum Effects {
     Print(String),
 }
 
-#[derive(Effect, Composable)]
+#[derive(Effect, Select)]
 #[input(Effects)]
 pub enum EffectsOutput {
     #[part(AcceptedTcp)]
@@ -86,8 +86,8 @@ impl Handler<EffectsOutput> for TcpHandler {
 fn main() {
     let server = |context: Context<EffectsOutput>| {
         move || {
-            let AcceptedTcp(addr) = perform!(Effects::ListenTcp(8224), context);
-            let ReadTcp(data) = perform!(Effects::ReadTcp(addr), context);
+            let AcceptedTcp(addr) = perform!(Effects::ListenTcp(8224), &context);
+            let ReadTcp(data) = perform!(Effects::ReadTcp(addr), &context);
             perform!(Effects::Print(data));
         }
     };

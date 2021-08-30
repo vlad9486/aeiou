@@ -20,7 +20,7 @@ pub fn derive_effect(input: proc_macro::TokenStream) -> proc_macro::TokenStream 
     t.into()
 }
 
-#[proc_macro_derive(Composable, attributes(part))]
+#[proc_macro_derive(Select, attributes(part))]
 pub fn derive_composable(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let syn::DeriveInput { ident, data, .. } = syn::parse_macro_input!(input);
 
@@ -38,9 +38,9 @@ pub fn derive_composable(input: proc_macro::TokenStream) -> proc_macro::TokenStr
 
     let t = quote::quote! {
         #(
-        impl Composable<#ty> for #ident {
+        impl Select<#ty> for #ident {
             fn take(output: &aeiou::Context<Self>) -> Option<#ty> {
-                match output.0.borrow_mut().take()? {
+                match output.take()? {
                     #ident::#id(v) => Some(#ty(v)),
                     _ => None,
                 }

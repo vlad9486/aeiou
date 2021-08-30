@@ -2,31 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 use std::{
-    rc::Rc,
     cell::RefCell,
     pin::Pin,
     ops::{Generator, GeneratorState},
     collections::BTreeMap,
 };
 use either::Either;
-
-pub struct Context<Output>(Rc<RefCell<Option<Output>>>);
-
-impl<Output> Context<Output> {
-    pub fn empty() -> Self {
-        Context(Rc::new(RefCell::new(None)))
-    }
-
-    pub fn take(&self) -> Option<Output> {
-        self.0.borrow_mut().take()
-    }
-}
-
-impl<Output> Clone for Context<Output> {
-    fn clone(&self) -> Self {
-        Context(self.0.clone())
-    }
-}
+use super::context::Context;
 
 pub trait TaskId {
     type Id: Eq + Ord;
@@ -153,7 +135,7 @@ where
                                 new_tasks.insert(id, task);
                                 match y {
                                     Either::Left(further) => yield further,
-                                    Either::Right(output) => *context.0.borrow_mut() = Some(output),
+                                    Either::Right(output) => context.put(output),
                                 }
                             },
                         }
@@ -190,9 +172,7 @@ where
                         if let Ok(effect) = y.is_effect() {
                             let mut h = handler.borrow_mut();
                             match h(effect) {
-                                Ok(output) => {
-                                    *context.0.borrow_mut() = Some(output);
-                                },
+                                Ok(output) => context.put(output),
                                 Err(y) => {
                                     drop(h);
                                     yield y;

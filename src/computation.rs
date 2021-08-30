@@ -7,7 +7,7 @@ use std::{
     cell::RefCell,
     fmt,
 };
-use super::algebra::{Effect, Context};
+use super::{algebra::Effect, context::Context};
 
 pub trait Handler<E>
 where
@@ -50,7 +50,7 @@ where
     G: Unpin + Generator<(), Return = (), Yield = E::Input>,
 {
     fn into_computation(self) -> Computation<E, G> {
-        let context = Context::default();
+        let context = Context::empty();
         Computation {
             generator: self(context.clone()),
             context,
@@ -97,7 +97,7 @@ where
                     GeneratorState::Yielded(effects) => {
                         let mut h = handler.borrow_mut();
                         match h.handle(effects) {
-                            Ok(handled) => *context.0.borrow_mut() = Some(handled),
+                            Ok(handled) => context.put(handled),
                             Err(unhandled) => {
                                 drop(h);
                                 yield unhandled;
