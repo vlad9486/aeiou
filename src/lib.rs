@@ -7,16 +7,16 @@
 #[cfg(feature = "aeiou-macros")]
 pub use aeiou_macros::*;
 
-mod algebra;
-pub use self::algebra::{Effect, Select};
-
 mod computation;
-pub use self::computation::{Computation, IntoComputation, Handler};
-
-pub mod new;
+pub use self::computation::{Handler, Effect, Select};
 
 mod context;
 pub use self::context::Context;
+
+mod block;
+pub use self::block::{Block, IntoBlock};
+
+pub mod new;
 
 #[macro_export]
 macro_rules! perform {

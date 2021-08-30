@@ -10,7 +10,7 @@ use std::{
     thread,
     time::Duration,
 };
-use aeiou::{Select, Context, Effect, Handler, IntoComputation, perform};
+use aeiou::{Select, Context, Effect, Handler, IntoBlock, perform};
 
 #[derive(Debug)]
 pub enum Effects {
@@ -102,7 +102,7 @@ fn main() {
 
     let server_thread = thread::spawn(move || {
         server
-            .into_computation()
+            .into_block()
             .add_handler(TcpHandler::default())
             .add_handler(|effect| match effect {
                 Effects::Print(msg) => {
@@ -111,12 +111,14 @@ fn main() {
                 },
                 _ => Err(effect),
             })
+            .assert_handled()
             .run()
     });
     thread::sleep(Duration::from_millis(10));
     client
-        .into_computation()
+        .into_block()
         .add_handler(TcpHandler::default())
+        .assert_handled()
         .run();
     server_thread.join().unwrap();
 }

@@ -8,7 +8,7 @@ use std::{
     collections::BTreeMap,
 };
 use either::Either;
-use super::context::Context;
+use super::block::Block;
 
 pub trait TaskId {
     type Id: Eq + Ord;
@@ -48,52 +48,6 @@ impl Request for ! {
     }
 }
 
-pub struct Block<Output, G>
-where
-    G: Unpin + Generator<(), Return = ()>,
-    G::Yield: Request,
-{
-    context: Context<Output>,
-    generator: G,
-}
-
-pub trait IntoBlock<Output, G>
-where
-    G: Unpin + Generator<(), Return = ()>,
-    G::Yield: Request,
-{
-    fn into_block(self) -> Block<Output, G>;
-}
-
-impl<F, Output, G> IntoBlock<Output, G> for F
-where
-    F: FnOnce(Context<Output>) -> G,
-    G: Unpin + Generator<(), Return = ()>,
-    G::Yield: Request,
-{
-    fn into_block(self) -> Block<Output, G> {
-        let context = Context::empty();
-        Block {
-            context: context.clone(),
-            generator: self(context),
-        }
-    }
-}
-
-impl<Output, G> Block<Output, G>
-where
-    G: Unpin + Generator<(), Return = (), Yield = !>,
-    G::Yield: Request,
-{
-    pub fn run(self) {
-        let Block { mut generator, .. } = self;
-        match Pin::new(&mut generator).resume(()) {
-            GeneratorState::Complete(()) => (),
-            GeneratorState::Yielded(_) => unreachable!(),
-        }
-    }
-}
-
 impl<Output, G> Block<Output, G>
 where
     G: Unpin + Generator<(), Return = ()>,
@@ -107,50 +61,52 @@ where
         F: Fn(<G::Yield as Request>::Task) -> T,
         T: Unpin + Generator<(), Return = (), Yield = Either<G::Yield, Output>>,
     {
-        let Block { context, generator } = self;
-        Block {
-            context: context.clone(),
-            generator: move || {
-                let mut generator = Some(generator);
-                let mut tasks = BTreeMap::new();
-                loop {
-                    if let Some(g) = generator.as_mut() {
-                        match Pin::new(g).resume(()) {
-                            GeneratorState::Complete(()) => {
-                                let _ = generator.take();
+        let context = self.context();
+        let generator = move || {
+            let mut block = Some(self);
+            let mut tasks = BTreeMap::new();
+            loop {
+                if let Some(g) = block.as_mut() {
+                    match g.resume() {
+                        GeneratorState::Complete(()) => {
+                            let _ = block.take();
+                        },
+                        GeneratorState::Yielded(y) => match y.is_task() {
+                            Ok(task) => {
+                                tasks.insert(task.task_id(), task_gen(task));
                             },
-                            GeneratorState::Yielded(y) => match y.is_task() {
-                                Ok(task) => {
-                                    tasks.insert(task.task_id(), task_gen(task));
-                                },
-                                Err(y) => yield y,
-                            },
-                        }
-                    }
-                    let mut new_tasks = BTreeMap::new();
-                    for (id, mut task) in tasks {
-                        match Pin::new(&mut task).resume(()) {
-                            GeneratorState::Complete(()) => (),
-                            GeneratorState::Yielded(y) => {
-                                new_tasks.insert(id, task);
-                                match y {
-                                    Either::Left(further) => yield further,
-                                    Either::Right(output) => context.put(output),
-                                }
-                            },
-                        }
-                    }
-                    tasks = new_tasks;
-
-                    if generator.is_none() && tasks.is_empty() {
-                        break;
+                            Err(y) => yield y,
+                        },
                     }
                 }
-            },
-        }
+                let mut new_tasks = BTreeMap::new();
+                for (id, mut task) in tasks {
+                    match Pin::new(&mut task).resume(()) {
+                        GeneratorState::Complete(()) => (),
+                        GeneratorState::Yielded(y) => {
+                            new_tasks.insert(id, task);
+                            match y {
+                                Either::Left(further) => yield further,
+                                Either::Right(output) => {
+                                    if let Some(block) = block.as_ref() {
+                                        block.put(output);
+                                    }
+                                },
+                            }
+                        },
+                    }
+                }
+                tasks = new_tasks;
+
+                if block.is_none() && tasks.is_empty() {
+                    break;
+                }
+            }
+        };
+        Block::new(context, generator)
     }
 
-    pub fn add_handler<Handler, NewYield>(
+    pub fn add_handler_<Handler, NewYield>(
         self,
         handler: Handler,
     ) -> Block<Output, impl Generator<(), Return = (), Yield = NewYield>>
@@ -158,31 +114,27 @@ where
         Handler: FnMut(<G::Yield as Request>::Effect) -> Result<Output, NewYield>,
         NewYield: Request,
     {
-        let Block {
-            context,
-            mut generator,
-        } = self;
+        let context = self.context();
         let handler = RefCell::new(handler);
-        Block {
-            context: context.clone(),
-            generator: move || loop {
-                match Pin::new(&mut generator).resume(()) {
-                    GeneratorState::Complete(()) => break,
-                    GeneratorState::Yielded(y) => {
-                        if let Ok(effect) = y.is_effect() {
-                            let mut h = handler.borrow_mut();
-                            match h(effect) {
-                                Ok(output) => context.put(output),
-                                Err(y) => {
-                                    drop(h);
-                                    yield y;
-                                },
-                            }
+        let mut s = self;
+        let generator = move || loop {
+            match s.resume() {
+                GeneratorState::Complete(()) => break,
+                GeneratorState::Yielded(y) => {
+                    if let Ok(effect) = y.is_effect() {
+                        let mut h = handler.borrow_mut();
+                        match h(effect) {
+                            Ok(output) => s.put(output),
+                            Err(y) => {
+                                drop(h);
+                                yield y;
+                            },
                         }
-                    },
-                }
-            },
-        }
+                    }
+                },
+            }
+        };
+        Block::new(context, generator)
     }
 }
 
@@ -196,7 +148,8 @@ mod tests {
 
     use either::Either;
 
-    use super::{IntoBlock, Context, TaskId, Request};
+    use crate::{IntoBlock, Context};
+    use super::{TaskId, Request};
 
     #[test]
     fn simple_tcp() {
@@ -292,7 +245,7 @@ mod tests {
                     }
                 }
             })
-            .add_handler({
+            .add_handler_({
                 let mut listener = None::<TcpListener>;
                 let mut streams = BTreeMap::new();
                 move |effect: Effect| match effect {
